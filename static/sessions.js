@@ -684,6 +684,22 @@ function _clearCronSessionCompletionUnreadForInactiveProfiles(activeProfile) {
   return true;
 }
 
+function _clearAllCronSessionCompletionUnread() {
+  const unread = _getSessionCompletionUnread();
+  let changed = false;
+  for (const sid of Object.keys(unread)) {
+    const marker = unread[sid];
+    if (!marker || typeof marker !== 'object' || Array.isArray(marker)) continue;
+    if (!_resolveCronCompletionMarkerOrigin(sid, marker).isCron) continue;
+    delete unread[sid];
+    changed = true;
+  }
+  if (!changed) return false;
+  _saveSessionCompletionUnread();
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  return true;
+}
+
 function _clearSessionViewedCount(sid) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();

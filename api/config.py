@@ -11435,6 +11435,7 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "rtl": False,  # right-to-left chat layout (chat messages + composer only)
     "notifications_enabled": False,  # browser notification when tab is in background
+    "cron_unread_badges": True,  # show Tasks/session unread markers for cron completions
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # legacy compatibility; Worklog renderer remains enabled
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
@@ -11731,6 +11732,7 @@ _SETTINGS_BOOL_KEYS = {
     "sound_enabled",
     "rtl",
     "notifications_enabled",
+    "cron_unread_badges",
     "show_thinking",
     "terminal_auto_expand_on_output",
     "workspace_todos_tab",
