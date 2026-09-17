@@ -48,6 +48,7 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsIgnoreAgentUpdates", "ignore_agent_updates"),
     ("settingsSoundEnabled", "sound_enabled"),
     ("settingsNotificationsEnabled", "notifications_enabled"),
+    ("settingsCronUnreadBadges", "cron_unread_badges"),
     ("settingsSidebarDensity", "sidebar_density"),
     ("settingsAutoTitleRefresh", "auto_title_refresh_every"),
     ("settingsDefaultMessageMode", "default_message_mode"),

@@ -8811,6 +8811,8 @@ function _preferencesPayloadFromUi(){
   if(rtlCb) payload.rtl=rtlCb.checked;
   const notifCb=$('settingsNotificationsEnabled');
   if(notifCb) payload.notifications_enabled=notifCb.checked;
+  const cronUnreadBadgesCb=$('settingsCronUnreadBadges');
+  if(cronUnreadBadgesCb) payload.cron_unread_badges=cronUnreadBadgesCb.checked;
   const sidebarDensitySel=$('settingsSidebarDensity');
   if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
   const pinnedLimitField=$('settingsPinnedSessionsLimit');
@@ -9382,6 +9384,16 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const cronUnreadBadgesCb=$('settingsCronUnreadBadges');
+    if(cronUnreadBadgesCb){
+      cronUnreadBadgesCb.checked=settings.cron_unread_badges!==false;
+      window._cronUnreadBadgesEnabled=cronUnreadBadgesCb.checked;
+      cronUnreadBadgesCb.addEventListener('change',()=>{
+        window._cronUnreadBadgesEnabled=cronUnreadBadgesCb.checked;
+        if(!cronUnreadBadgesCb.checked) _clearCronUnreadMarkers();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const maxTokensField=$('settingsMaxTokens');
     if(maxTokensField){
       const rawMaxTokens=settings.max_tokens;
@@ -13069,13 +13081,15 @@ function startCronPolling(){
             showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
-          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
-              source:'cron',
-              profile:activeProfile,
-            });
+          if(window._cronUnreadBadgesEnabled!==false){
+            if(c.job_id) _cronNewJobIds.add(String(c.job_id));
+            if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+              const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+              _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+                source:'cron',
+                profile:activeProfile,
+              });
+            }
           }
         }
         // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
@@ -13102,6 +13116,13 @@ function updateCronBadge(){
   }else if(badge){
     badge.style.display='none';
   }
+}
+
+function _clearCronUnreadMarkers(){
+  _cronNewJobIds.clear();
+  if(typeof _clearAllCronSessionCompletionUnread==='function') _clearAllCronSessionCompletionUnread();
+  updateCronBadge();
+  if($('cronList')) renderCrons();
 }
 
 // Clear cron badge only when all unread jobs have been viewed (not on panel open)

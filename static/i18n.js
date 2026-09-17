@@ -1260,6 +1260,8 @@ const LOCALES = {
     settings_desc_tts_engine: 'Choose speech engine. Edge TTS uses Microsoft neural voices via the server.',
     settings_label_notifications: 'Browser notifications',
     settings_desc_notifications: 'Show a system notification when a response completes while the app is in the background.',
+    settings_label_cron_unread_badges: 'Cron completion badges',
+    settings_desc_cron_unread_badges: 'Show unread markers in Tasks and the session sidebar when scheduled jobs finish. Completion toasts are controlled per job.',
     notifications_enable_btn: 'Enable notifications',
     notifications_test_btn: 'Send test',
     notifications_permission_status: (status) => `Permission: ${status}`,
