@@ -26,3 +26,10 @@ def test_muted_cron_badges_skip_all_unread_markers_but_not_toasts():
     assert completion_loop.index("if(window._cronUnreadBadgesEnabled!==false)") < completion_loop.index("_cronNewJobIds.add")
     assert completion_loop.index("if(window._cronUnreadBadgesEnabled!==false)") < completion_loop.index("_markSessionCompletionUnreadIfBackground")
     assert "_clearCronUnreadMarkers()" in PANELS_JS
+
+
+def test_clearing_cron_unread_markers_uses_the_existing_cron_renderer():
+    clear_helper = PANELS_JS.split("function _clearCronUnreadMarkers(){", 1)[1].split("\n}", 1)[0]
+    assert "renderCrons" not in clear_helper
+    assert "typeof loadCrons==='function'" in clear_helper
+    assert "loadCrons();" in clear_helper

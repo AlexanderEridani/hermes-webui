@@ -13122,7 +13122,7 @@ function _clearCronUnreadMarkers(){
   _cronNewJobIds.clear();
   if(typeof _clearAllCronSessionCompletionUnread==='function') _clearAllCronSessionCompletionUnread();
   updateCronBadge();
-  if($('cronList')) renderCrons();
+  if($('cronList')&&typeof loadCrons==='function') loadCrons();
 }
 
 // Clear cron badge only when all unread jobs have been viewed (not on panel open)
