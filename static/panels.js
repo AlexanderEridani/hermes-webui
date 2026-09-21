@@ -13069,6 +13069,10 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
+  // Setting flags live on the DOM root in the browser; resolve it without a bare
+  // `window` reference so the polling loop also runs under non-DOM harnesses
+  // (a bare reference throws and the loop's catch would swallow it silently).
+  const _badgesHost=(typeof window!=='undefined')?window:(typeof globalThis!=='undefined'?globalThis:{});
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
@@ -13081,7 +13085,7 @@ function startCronPolling(){
             showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           }
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(window._cronUnreadBadgesEnabled!==false){
+          if(_badgesHost._cronUnreadBadgesEnabled!==false){
             if(c.job_id) _cronNewJobIds.add(String(c.job_id));
             if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
               const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
