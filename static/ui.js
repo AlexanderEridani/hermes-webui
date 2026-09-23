@@ -18508,6 +18508,52 @@ function renderMessages(options){
       group._deferredWorklogDisclosure=worklogDetailDisclosureState;
     });
   }
+  // Persisted per-turn spend. The live figure lives in client-only `_turnUsage`, which is never
+  // written to the session sidecar, so a reloaded transcript had no spend to show — the badge
+  // disappeared even with the setting on. The server now stamps `turn_usage` (cumulative session
+  // cost at that turn plus its provenance) on the assistant row; rebuild the per-turn figure by
+  // differencing consecutive rows, and treat the turn as unknown-but-approximate if a row lacks it.
+  function _effectiveTurnUsage(msg, mi){
+    if(!msg) return null;
+    if(msg._turnUsage) return msg._turnUsage;
+    const tu=msg.turn_usage;
+    if(!tu||typeof tu!=='object') return null;
+    const cur=Number(tu.session_cost_usd);
+    // `turn_usage.input_tokens/output_tokens` (as persisted by the gateway) are the
+    // SESSION-cumulative token totals — the same shape as `session_cost_usd`. The live
+    // path (messages.js) already deltas them into per-turn values; the reloaded path
+    // must do the same, or every historical reply would show the whole session's
+    // input/output as its own (e.g. "650,150 in · 1,699 out" on each.) Screenshot:
+    // #503 — the cost line above deltas `cur - prev`; mirror that here for tokens.
+    let prevIn=0, prevOut=0, prevCost=0, seenPrev=false;
+    for(let i=mi-1;i>=0;i--){
+      const p=S.messages[i];
+      if(!p||p.role!=='assistant') continue;
+      const ptu=p.turn_usage;
+      // Only server-persisted rows count as the cumulative baseline. Live `_turnUsage` rows
+      // carry per-turn token DELTAS (and key their total as `session_cost`, not `session_cost_usd`),
+      // so including them would mix units — delta vs cumulative — and produce garbage. The
+      // persisted rows are identified by `session_cost_usd` (the gateway stamps it; live rows use
+      // `session_cost`. Esto mirrors the pre-existing cost delta guard below.
+      if(ptu&&typeof ptu==='object'&&ptu.session_cost_usd!=null){
+        prevIn=Number(ptu.input_tokens)||0;
+        prevOut=Number(ptu.output_tokens)||0;
+        prevCost=Number(ptu.session_cost_usd)||0;
+        seenPrev=true; break;
+      }
+    }
+    const curIn=Number(tu.input_tokens)||0;
+    const curOut=Number(tu.output_tokens)||0;
+    const cost=isFinite(cur)?Math.max(0,cur-(seenPrev?prevCost:0)):0;
+    return {
+      input_tokens:seenPrev?Math.max(0,curIn-prevIn):curIn,
+      output_tokens:seenPrev?Math.max(0,curOut-prevOut):curOut,
+      estimated_cost:cost,
+      cost_status:tu.cost_status,
+      session_cost:isFinite(cur)?cur:0,
+    };
+  }
+
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
   // the basic "how long did that turn take?" UX question. Only walk rendered
@@ -18522,7 +18568,8 @@ function renderMessages(options){
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
       const failoverText=_gatewayRoutingFailoverText(routing);
       const modelWarningText=_gatewayModelWarningText(routing);
-      const hasTurnUsage=!!msg._turnUsage;
+      const _tu=_effectiveTurnUsage(msg,mi);
+      const hasTurnUsage=!!_tu;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
       // Worklog above the final answer.
@@ -18580,12 +18627,28 @@ function renderMessages(options){
       if(window._showTokenUsage&&hasTurnUsage){
         const usage=document.createElement('span');
         usage.className='msg-usage-inline';
-        const inTok=msg._turnUsage.input_tokens||0;
-        const outTok=msg._turnUsage.output_tokens||0;
-        const cost=msg._turnUsage.estimated_cost;
+        const inTok=_tu.input_tokens||0;
+        const outTok=_tu.output_tokens||0;
+        const cost=_tu.estimated_cost;
+        // Spend provenance: 'actual' means the provider billed every contributing call, so the
+        // figure prints bare. Anything else is a local table estimate and keeps the `~` marker —
+        // an estimate must never read as billed spend.
+        const _exact=_tu.cost_status==='actual';
+        const _mark=_exact?'':'~';
+        const _fmt=(v)=>v<0.01?v.toFixed(4):v.toFixed(2);
         let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-        const cacheHitPct=msg._turnUsage.cache_hit_percent;
+        if(cost) text+=` · ${_mark}$${_fmt(cost)}`;
+        const sessionCost=_tu.session_cost;
+        // Append the running session total to every footer, live and reloaded alike — the
+        // per-turn figure alone can't show how much the session has accumulated, and there is
+        // no other live renderer for it. Both paths supply a monotonic cumulative total
+        // (live: `d.usage.session_cost_usd` via `_turnUsage`; reloaded: the persisted
+        // `turn_usage.session_cost_usd`), so differencing/labels behave identically.
+        if(sessionCost>0){
+          const _totalLabel=t('usage_session_total');
+          text+=` · ${_mark}$${_fmt(sessionCost)}${_totalLabel?` ${_totalLabel}`:''}`;
+        }
+        const cacheHitPct=_tu.cache_hit_percent;
         if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
         usage.textContent=text;
         fragments.push(usage);

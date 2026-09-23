@@ -13,6 +13,7 @@ const ICONS={
   spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
   download:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M14 10.5v2.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2.5"/><polyline points="4.5 7 8 10.5 11.5 7"/><line x1="8" y1="10.5" x2="8" y2="2"/></svg>',
+  checkRead:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.5l3.5 3.5L14 3.5"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -556,6 +557,26 @@ function _clearSessionCompletionUnread(sid) {
   if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
   delete unread[sid];
   _saveSessionCompletionUnread();
+}
+
+// Mark a session AND its child sessions (delegated subagents, forks) as read.
+// Visiting only the parent row leaves child transcripts un-acked forever, so
+// the parent's aggregated unread dot (`_child_session_has_unread`) never
+// clears. This acks the whole family in one action.
+function _markSessionFamilyRead(sid) {
+  if (!sid) return;
+  const targets = [sid];
+  for (const s of (_allSessions || [])) {
+    if (s && s.session_id && _isChildSession(s) && s.parent_session_id === sid) targets.push(s.session_id);
+  }
+  for (const target of targets) {
+    const snapshot = _sessionListSnapshotById.get(target)
+      || (_allSessions || []).find(s => s && s.session_id === target)
+      || null;
+    // _setSessionViewedCount also clears any stale completion-unread marker.
+    _setSessionViewedCount(target, Number(snapshot && snapshot.message_count) || 0);
+  }
+  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
 }
 
 // True when a session row is a cron-origin session for unread-dot scoping.
@@ -4971,6 +4992,21 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
+  // Mark read (incl. subagents): one action acks the conversation and every
+  // child session under it. Delegated subagent transcripts are never opened
+  // directly, so their unread state would otherwise keep the parent row lit.
+  const hasChildSessions=(_allSessions||[]).some(s=>s&&_isChildSession(s)&&s.parent_session_id===session.session_id);
+  if(hasChildSessions){
+    menu.appendChild(_buildSessionAction(
+      t('session_mark_read_children'),
+      t('session_mark_read_children_desc'),
+      ICONS.checkRead,
+      ()=>{
+        closeSessionActionMenu();
+        _markSessionFamilyRead(session.session_id);
+      }
+    ));
+  }
   _appendSessionShareActions(menu, session);
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
@@ -7102,9 +7138,14 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
   const childHasUnread=(childRow)=>typeof _hasUnreadForSession==='function'
     ? _hasUnreadForSession(childRow)
     : !!(childRow&&childRow.has_unread);
-  const bubbleSidebarState=(parentRow, childRow)=>{
+  const bubbleSidebarState=(parentRow, childRow, isDelegatedSubagent)=>{
     if(isChildStreaming(childRow)) parentRow._child_session_streaming=true;
-    if(childHasUnread(childRow)) parentRow._child_session_has_unread=true;
+    // Delegated-subagent children are parent-owned work the user reads through
+    // the parent's summary — they are never visited directly, so their
+    // finished-unread state must NOT light the parent's aggregated dot (it
+    // would otherwise never clear). Streaming and attention roll-ups
+    // (approvals / clarify questions) still bubble up.
+    if(childHasUnread(childRow)&&!isDelegatedSubagent) parentRow._child_session_has_unread=true;
     const childActivityRaw=childRow
       ? (childRow._sidebar_activity_at??childRow.last_message_at??childRow.updated_at??childRow.created_at??0)
       : 0;
@@ -7241,7 +7282,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
         parentRow._child_sessions.push(childCopy);
         parentRow._child_session_count=parentRow._child_sessions.length;
       }
-      bubbleSidebarState(parentRow, childCopy);
+      bubbleSidebarState(parentRow, childCopy, childIsDelegatedSubagent);
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
       // #5305: a delegated subagent child whose WebUI parent is NOT a visible

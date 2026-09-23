@@ -6398,6 +6398,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                   cache_read_tokens:Math.max(0,curCacheRead-_prevCacheRead),
                   cache_write_tokens:Math.max(0,curCacheWrite-_prevCacheWrite),
                   cache_hit_percent:d.usage.turn_cache_hit_percent,
+                  // Spend provenance for this turn, plus the running session total. `cost_status`
+                  // 'actual' means every contributing call was provider-reported, so the footer
+                  // can print billed spend instead of an estimate.
+                  cost_status:d.usage.cost_status,
+                  session_cost:d.usage.session_cost_usd,
                 };
               }
               if(typeof d.usage.duration_seconds==='number'){

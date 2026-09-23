@@ -9384,6 +9384,10 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    # Durable session-cost cache: [fetched_at_monotonic, (amount, status, source) | None].
+    # _live_usage_snapshot() runs ~10x/sec, and the durable figure only changes once per
+    # model call, so a short TTL avoids hammering state.db on every metering tick.
+    _durable_cost_cache = [0.0, None]
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -9430,6 +9434,56 @@ def _run_agent_streaming(
         _live_prompt_estimate_tool_delta_tokens[0] = _usage['turn_tool_prompt_tokens']
         return _live_prompt_estimate_tokens[0]
 
+    def _durable_session_cost(session_id):
+        """Authoritative session spend from state.db.
+
+        ``agent.session_estimated_cost_usd`` is process-scoped: it starts at 0 on every
+        restart and only accumulates the turns since, so a long-lived session (which the
+        WebUI keeps alive across restarts) reports a small fraction of its real spend.
+        The persisted row is what survives. For provider-reported calls — OpenRouter
+        inlines ``usage.cost``, including for ``openrouter/auto`` — the actual column is
+        billed truth, so prefer it; otherwise fall back to the estimate track.
+        Returns ``(amount, status, source)`` or ``None``.
+        """
+        if not session_id or not isinstance(session_id, str):
+            return None
+        _now_mono = time.monotonic()
+        if _durable_cost_cache[0] and (_now_mono - _durable_cost_cache[0]) < 2.0:
+            return _durable_cost_cache[1]
+        _durable_cost_cache[0] = _now_mono
+        try:
+            from api.models import _active_state_db_path
+            db_path = _active_state_db_path()
+            if not db_path.exists():
+                return None
+            _conn = sqlite3.connect(str(db_path), timeout=2)
+            try:
+                row = _conn.execute(
+                    'SELECT actual_cost_usd, estimated_cost_usd, cost_status, cost_source '
+                    'FROM sessions WHERE id=?', (session_id,)).fetchone()
+            finally:
+                _conn.close()
+        except Exception:
+            _durable_cost_cache[1] = None
+            return None
+        if not row:
+            _durable_cost_cache[1] = None
+            return None
+        def _num(v):
+            return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        _a, _e = _num(row[0]), _num(row[1])
+        _status, _source = row[2], row[3]
+        _src = _source if isinstance(_source, str) and _source else None
+        _out = None
+        if _a is not None and _a > 0 and math.isfinite(_a) and _status == 'actual':
+            _out = (_a, 'actual', _src)
+        elif _e is not None and _e > 0 and math.isfinite(_e):
+            _out = (_e, 'estimated', _src)
+        elif _a is not None and _a > 0 and math.isfinite(_a):
+            _out = (_a, 'actual', _src)
+        _durable_cost_cache[1] = _out
+        return _out
+
     def _live_usage_snapshot():
         """Best-effort live usage payload for mid-stream UI updates.
 
@@ -9442,6 +9496,9 @@ def _run_agent_streaming(
             'input_tokens': 0,
             'output_tokens': 0,
             'estimated_cost': 0,
+            'session_cost_usd': None,
+            'cost_status': None,
+            'cost_source': None,
             'cache_read_tokens': 0,
             'cache_write_tokens': 0,
             'cache_hit_percent': None,
@@ -9458,8 +9515,43 @@ def _run_agent_streaming(
                 _usage['input_tokens'] = getattr(_agent, 'session_prompt_tokens', 0) or 0
                 _usage['output_tokens'] = getattr(_agent, 'session_completion_tokens', 0) or 0
                 _usage['estimated_cost'] = getattr(_agent, 'session_estimated_cost_usd', 0) or 0
+                # Spend provenance must ride on the same live payload so the badge can print
+                # provider-reported "actual" spend (bare $) rather than a `~`-marked estimate-delta.
+                # `session_estimated_cost_usd` already accumulates the provider-reported amount
+                # when the provider inlines it (OpenRouter always does, even for `openrouter/auto`),
+                # so `session_cost_usd` is the running total and `cost_status` tells the client
+                # whether it may be shown as billed. Mirror the gateway api_server payload.
+
+                _sc = getattr(_agent, 'session_estimated_cost_usd', None)
+                if isinstance(_sc, (int, float)) and not isinstance(_sc, bool) and _sc is not None:
+                    try:
+                        _scf = float(_sc)
+                        if math.isfinite(_scf):
+                            _usage['session_cost_usd'] = _scf
+                    except (TypeError, ValueError):
+                        pass
+                _all_actual = bool(getattr(_agent, 'session_cost_all_actual', False))
+                _usage['cost_status'] = 'actual' if _all_actual else 'estimated'
+                _cs = getattr(_agent, 'session_cost_source', None)
+                if isinstance(_cs, str) and _cs:
+                    _usage['cost_source'] = _cs
                 _usage['cache_read_tokens'] = getattr(_agent, 'session_cache_read_tokens', 0) or 0
                 _usage['cache_write_tokens'] = getattr(_agent, 'session_cache_write_tokens', 0) or 0
+            except Exception:
+                pass
+            # Prefer the durable, restart-proof total over the process-scoped accumulator.
+            # The accumulator resets on every WebUI restart, so a long-lived session shows
+            # only the turns since the last restart. That is why a picked model looked right
+            # (its local price table made the partial sum plausible) while `openrouter/auto`
+            # looked wrong. state.db holds the persisted, provider-reported total.
+            try:
+                _durable = _durable_session_cost(
+                    getattr(_agent, 'session_id', None) if _agent is not None else None)
+                if _durable is not None:
+                    _usage['session_cost_usd'] = _durable[0]
+                    _usage['cost_status'] = _durable[1]
+                    if _durable[2]:
+                        _usage['cost_source'] = _durable[2]
             except Exception:
                 pass
             try:
@@ -12377,6 +12469,17 @@ def _run_agent_streaming(
                 estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
+                # Spend provenance for the finished turn. ``session_estimated_cost_usd`` is
+                # process-scoped (resets on restart, accumulating only turns since), so prefer
+                # the durable state.db total — that is what makes the footer figure correct for
+                # a long-lived session and lets it print billed spend without a `~`.
+                _durable_cost = _durable_session_cost(getattr(agent, 'session_id', None))
+                _session_cost_usd = None
+                _cost_status = None
+                _cost_source = None
+                if _durable_cost is not None:
+                    _session_cost_usd, _cost_status, _cost_source = _durable_cost
+                    estimated_cost = _session_cost_usd
                 prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
                 prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
                 turn_input_tokens = max(0, input_tokens - prev_input_tokens)
@@ -12478,7 +12581,16 @@ def _run_agent_streaming(
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
-                _used_model = getattr(agent, 'model', None) or resolved_model or model
+                # For a routing/auto alias the configured agent.model is the alias, while
+                # agent.last_served_model (populated from the provider's response.model in
+                # turn_usage.record_response_usage) is the concrete model that actually ran —
+                # e.g. ``openrouter/auto → deepseek/deepseek-chat``. Prefer the served one so the
+                # per-turn model chip shows what really answered, not the alias.
+                _used_model = (
+                    getattr(agent, 'last_served_model', None)
+                    or getattr(agent, 'model', None)
+                    or resolved_model or model
+                )
                 if _gateway_routing:
                     s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
@@ -12497,6 +12609,24 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            # Persist this turn's spend on the row itself. The browser keeps the
+                            # live figure in client-only state, which is never written to the
+                            # sidecar, so without this the footer's spend silently disappears on
+                            # reload ("the toggle looks broken"). Same shape the gateway path
+                            # stamps in api/gateway_chat.py.
+                            _tu_row = {}
+                            if input_tokens:
+                                _tu_row['input_tokens'] = input_tokens
+                            if output_tokens:
+                                _tu_row['output_tokens'] = output_tokens
+                            if _session_cost_usd is not None:
+                                _tu_row['session_cost_usd'] = _session_cost_usd
+                            if _cost_status:
+                                _tu_row['cost_status'] = _cost_status
+                            if _cost_source:
+                                _tu_row['cost_source'] = _cost_source
+                            if _tu_row:
+                                _dm['turn_usage'] = _tu_row
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -12877,6 +13007,15 @@ def _run_agent_streaming(
                 'turn_cache_hit_percent': turn_cache_hit_percent,
                 'duration_seconds': round(_turn_duration_seconds, 3),
             }
+            # Spend provenance: the running session total plus whether it may be presented as
+            # billed spend ("actual" — every contributing call was provider-reported) or only as
+            # an estimate. Mirrors the gateway api_server payload so both backends agree.
+            if _session_cost_usd is not None:
+                usage['session_cost_usd'] = _session_cost_usd
+            if _cost_status:
+                usage['cost_status'] = _cost_status
+            if _cost_source:
+                usage['cost_source'] = _cost_source
             if _turn_tps is not None:
                 usage['tps'] = _turn_tps
             if _gateway_routing:

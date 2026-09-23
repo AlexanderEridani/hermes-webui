@@ -28,8 +28,9 @@ class TestSidebarCancelAction:
         # manual title regeneration controls.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
-        # required growing this read window.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 7600)
+        # required growing this read window. 8600 in 2026-09 for the
+        # "Mark read (incl. subagents)" action.
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8600)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )

@@ -472,11 +472,20 @@ def _gateway_stream_usage(payload: dict) -> dict:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
         return {}
-    return {
+    out = {
         "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+    # Spend provenance. The gateway marks a session total ``actual`` only when every
+    # contributing call was provider-reported, so the footer can print billed spend without a
+    # `~` — and must print `~` for anything else. Without these fields the client cannot tell
+    # an exact total from a table estimate and has to guess.
+    for key in ("session_cost_usd", "cost_status", "cost_source"):
+        value = usage.get(key)
+        if value is not None:
+            out[key] = value
+    return out
 
 
 def _gateway_reasoning_delta(payload: dict) -> str:
@@ -1309,6 +1318,17 @@ def _run_gateway_chat_streaming(
                 active_turn_identity.get("timestamp") or now
             )
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
+            # Persist this turn's spend on the row itself. The browser keeps the live figure in
+            # client-only `_turnUsage`, which is never written to the session sidecar, so
+            # without this the footer's spend silently disappears on any reload ("toggle looks
+            # broken"). Values are the same ones the `done` event carries.
+            _turn_usage_for_msg = {
+                k: usage.get(k) for k in
+                ("input_tokens", "output_tokens", "session_cost_usd", "cost_status")
+                if usage.get(k) is not None
+            } if isinstance(usage, dict) else {}
+            if _turn_usage_for_msg:
+                assistant_msg["turn_usage"] = _turn_usage_for_msg
             saved_reasoning = STREAM_REASONING_TEXT.get(stream_id, "")
             if saved_reasoning:
                 assistant_msg["reasoning"] = saved_reasoning
